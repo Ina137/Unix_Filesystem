@@ -1,0 +1,9 @@
+Disk class creates disk file
+For every disk, we have a disk manager
+Disk manager will access methods from disk class to perform operations
+Super block -- take the first sector and use it to describe layout/partitions
+Super block tells you how to find partitions
+Disk manager calculates offsets to partitions
+Only one opportunity to edit the super block
+Disk manager needs to either init or read super block
+One partition manager associates with every disk manager (only one in this case)

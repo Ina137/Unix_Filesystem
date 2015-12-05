@@ -1,0 +1,6 @@
+
+You can make the following simplifying assumptions in your project:
+
+1. The block size is 64 bytes.
+2. Reserve block number 0 for disk manager.
+3. There will never be more then 4 partitions

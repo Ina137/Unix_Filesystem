@@ -1,0 +1,33 @@
+per process = per client
+global table may not be necessary
+
+open file table
+desc d1 = c1 -> open (a, read)
+desc d2  = c1 -> open (a, write)
+
+descriptors have a mode and a rw pointer
+In order to write, we need inode infor
+find rw position, rw pointer is relative to file itself
+rw pointer points to a byte in the file
+In terms of blocks, rw pointer 
+
+Only one fs per partition
+fs has same name as partitionevery time a file is created, make an inode
+implement our own inode structure
+
+pointer arithmetic
+64  bytes per block
+char* buffer
+buffer[0] = name
+buffer[1] = type
+buffer[2] = convert int size to char size
+	start at position 2, write 4 bytes as a representation of the size
+	always use all 4 bytes as allocation
+	
+	use sprintf
+	
+dm -> write(freeblock, buffer)
+
+When partition created, make bitvector at the zero block
+allocate first block for root dir
+first two parts of bv are occupied
