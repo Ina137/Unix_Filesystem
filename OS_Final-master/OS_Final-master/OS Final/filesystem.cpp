@@ -24,38 +24,51 @@ FileSystem::FileSystem(DiskManager *dm, char fileSystemName)
 }
 
 
-//return blocknum for creating a file called file
+//return blocknum for creating a file called file or -1 if the file doesn't exist.
 //traverses directories listed in filename of fnamelen characters
 //fnamelen is always a multiple of 2. we can't find the super-directory of the root.
+//if type is 'f', the block number returned points to a file inode
+//if type is 'd', the block number returned points to a block full of directory inodes.
 
 //upgrade the getDir to getInode, add a char type parameter, 
 //and then 4 length is weird, what about /a that you create a directory in root
 int FileSystem::getDir(char *filename, int fnamelen, char file, int block)
 {	
-	char dirList[64];
+char dirList[64];
 	myPM -> readDiskBlock(block, dirList);
-	if(fnamelen == 4)
+	if(fnamelen = 2) //we're in the file's directory
 	{
 		int i = 0;
 		while(i<60)
 		{
-			if(dirList[i] == filename[1]) //e.g. directory inode name = a, filename = /a/b
+			if(dirList[i] == filename[1])
 			{
-				return (int) dirList[i+1]; //return directory inode pointer, e.g. dInode = [a | 35 | d | etc.] returns 35
-				//should be the block number where the directory inode associated with /b is
+				/*the type variable is passed in by reference and tells us whether
+				  the block returned points to a file inode or a block  of directory 
+				  inodes.*/
+				if(dirList[i+2] == 'f')
+				{
+					fileDInodeIndex = i;
+					//remember the index of the dInode (for deleteFile)
+					type = 'f';
+				}
+				else if(dirList[i+2] == 'd')
+				{
+					type = 'd';
+				}
+				return dirList[i+1]; //block address for writing inode
 			}
-			//if this doesn't happen, i goes to 60.
-			i+=6; //move 6 at a time, the size of a directory inode.
+			i+=6;
 		}
-		if(i == 60)
+		if(i == 60) //we didn't find the file in this block
 		{
-			if(dirList[60] != 'c')
-				return getDir(filename, fnamelen, file, (int) dirList[60]); //we need to go to the next block of directory inodes and keep searching
+			if(dirList[60] != 'c') //if there's another block to look in
+				return getInode(filename, fnamelen, file, fileDInodeIndex, (int) dirList[60], type); //we need to go to the next block of directory inodes and keep searching
 			else
 				return -1; //we didn't find the filename because: 1. the dirList is at the end and 2. we didn't get another block to look in.
 		}
 	}
-	else if(fnamelen < 4 || fnamelen % 2 != 0)
+	else if(fnamelen % 2 != 0)
 		return -2; //there's a problem with the input
 	int j = 0;
 	while(j < 60) //if the fnamelen is too long, we still need to find our way around the directories
@@ -70,14 +83,14 @@ int FileSystem::getDir(char *filename, int fnamelen, char file, int block)
 				k++;
 			}
 			char *shortFn = fn; //format it to be passed back into the function
-			return getDir(shortFn, fnamelen-2, file, (int) dirList[j+1]); //recursive call with the shorter fnamelen and the new block that we want.
+			return getInode(shortFn, fnamelen-2, file, fileDInodeIndex, (int) dirList[j+1], type); //recursive call with the shorter fnamelen and the new block that we want.
 		}
 		j+=6;
 	}
 	if(j == 60) //same as above with j instead of i
 	{
 		if(dirList[60] != 'c')
-				return getDir(filename, fnamelen, file, (int) dirList[60]);
+				return getInode(filename, fnamelen, file, fileDInodeIndex, (int) dirList[60], type);
 			else
 				return -1;
 	}
@@ -119,6 +132,48 @@ int FileSystem::getDir(char *filename, int fnamelen, char file, int block)
 		// }
 	// }
 	// return -2;
+}
+
+/*
+FindSpot
+
+Returns: a spot in a block that we can write a directory inode to
+
+Updates actualBlk variable as more blocks are taken by a single
+directory
+*/
+int FileSystem::findSpot(int dirBlk, int &actualBlk)
+{
+	char buffer[64];
+	myPM -> readDiskBlock(dirBlk, buffer);
+	for(int i = 0; i < 60; i+=6)
+	{
+		if(buffer[i] == 'c')
+		{
+			return i; //return position in the block to write to
+		}
+	}
+	if(buffer[60] != 'c') //if the end of the block points somewhere...
+	{
+		//update actualBlk...
+		actualBlk = (int) buffer[60];
+		//return the same function, just different block
+		return findSpot(actualBlk, actualBlk);
+	}
+	else
+	{
+		//get another disk block for addressing
+		actualBlk = myPM -> getFreeDiskBlock();
+		//tell the full block to go to the new one at the end
+		buffer[60] = (char) actualBlk;
+		myPM -> writeDiskBlock(dirBlk, buffer);
+		//then return 0, because we can write at the beginning of the new block.
+		return 0;
+		/*REMEMBER TO USE ACTUALBLK VARIABLE PASSED IN, NOT 
+		  THE BLOCKNUM PASSED IN!!! They might be the same, but actualblk
+		  is what you definitely want to use. */
+		
+	}
 }
 
 /*
@@ -188,19 +243,6 @@ int FileSystem::createFile(char *filename, int fnameLen)
 		return -2;
 	else
 		return -4;
-}
-
-void traverseDirectories()
-{
-	//first make sure the file directory is vailid (aka /a/cc/...)
-	//look at block 1 of the partition (Directory)
-	//read through it and find the directory we need, say /a/b/c
-	//if c isnt there, create it. Otherwise do nothing
-	
-	//partitionName, diskBlock, the data buffer you want the data to be read into
-	myPM -> readDiskBlock(partitionName, 1, createBuffer);
-	
-	//name, type, pointer to another block
 }
 
 /*
@@ -333,6 +375,8 @@ int FileSystem::unlockFile(char *filename, int fnameLen, int lockId)
 	return -2;
 }
 
+
+
 /*
 DeleteFile
 
@@ -362,7 +406,7 @@ Returns: 0 if successfully deleted, -1 if file doesnt exist,
 int FileSystem::deleteFile(char *filename, int fnameLen)
 {
 	//_Variables_//
-	int inodeAddress;// Address (Block number) to the beginning of the file Inode 
+	int blockNum;// Address (Block number) to the beginning of the file Inode 
 	char last;// Variable used to store the actual filename
 	char clearBuffer[64];//Buffer used to 'delete' (replace with 'c's) blocks of 64 bytes
 	char clearDInodeBuffer[6];//Buffer used to 'delete' (replace with 'c's) blocks of 6 bytes (file dInode)
@@ -407,7 +451,8 @@ int FileSystem::deleteFile(char *filename, int fnameLen)
 	}
 	
 	//Check if file is open
-	if(openFileTable.find(*last) != openFileTable.end())
+	char fileDesc = findFileDescriptor(char last);	//Find the file descriptor
+	if(fdMode.find(filedesc) != fdMode.end()) //Check if it is open
 	{
 		return -2;
 	}
@@ -420,6 +465,7 @@ int FileSystem::deleteFile(char *filename, int fnameLen)
 			1 indirect address (pointers to indirect inode) 4 bytes
 			rest of the space for your attributes.
 	*/
+	
 	
 	//_Setup Copy Buffers_//	
 	
@@ -495,9 +541,6 @@ int FileSystem::deleteFile(char *filename, int fnameLen)
 	
 	//_Update Tables (Maps): fdTable, fdName, nameType, fdMode_//
 	
-	//Find the file descriptor
-	char tempFileDesc = findFileDescriptor(char last);
-	
 	//Update nameType
 	int temp = updateCharCharMaps(nameType, last);
 	if(temp == -3)
@@ -506,18 +549,18 @@ int FileSystem::deleteFile(char *filename, int fnameLen)
 	}
 	
 	//Update fdMode
-	int temp = updateCharCharMaps(fdMode, tempFileDesc);
+	int temp = updateCharCharMaps(fdMode, fileDesc);
 	if(temp == -3)
 	{
 		return -3;
 	}
 	
 	//Update fdTable 
-	if(fdTable.find(tempFileDesc) != fdTable.end())
+	if(fdTable.find(fileDesc) != fdTable.end())
 	{
-		if(fdTable[tempFileDesc] == fileDesc)
+		if(fdTable[fileDesc] == fileDesc)
 		{
-			std::map<char, int>::iterator del = fdTable.find(tempFileDesc);
+			std::map<char, int>::iterator del = fdTable.find(fileDesc);
 			fdTable.erase(del);
 		}
 		else
@@ -527,11 +570,11 @@ int FileSystem::deleteFile(char *filename, int fnameLen)
 	}
 	
 	//Update fdName 
-	if(fdName.find(tempFileDesc) != fdName.end())
+	if(fdName.find(fileDesc) != fdName.end())
 	{
-		if(fdName[tempFileDesc] == fileDesc)
+		if(fdName[fileDesc] == fileDesc)
 		{
-			std::map<char, int>::iterator del = fdName.find(tempFileDesc);
+			std::map<char, int>::iterator del = fdName.find(fileDesc);
 			fdName.erase(del);
 		}
 		else
@@ -550,7 +593,7 @@ Param: clearBuffer[64], clearBuffer[6]
 
 Fills both character buffers with 'c's
 */
-void fillClearBuffers(char clearBuffer, char clearDInodeBuffer)
+void fillClearBuffers(char clearBuffer, char clearDInodeBuffer)// Helper for deleteFile
 {
 	for(int i = 0; i < 64; i++)
 	{
@@ -570,7 +613,7 @@ Param: filename array, length of the filename
 Loops through the filename array to the end and returns the 
 actual filename (not /a/b/c/d, but instead returns d)
 */
-char findActualFilename(char filename, int fnameLen)
+char findActualFilename(char filename, int fnameLen)// Helper for deleteFile
 {
 	//Find the actual filename
 	for(int i = 0; i < fnameLen; i+=2)
@@ -595,7 +638,7 @@ char findActualFilename(char filename, int fnameLen)
 	
 	Returns: Number of blocks
 	*/
-	int calcFileSizeInNumOfBlocks(int filesize)
+	int calcFileSizeInNumOfBlocks(int filesize)// Helper for deleteFile
 	{
 		//I'm using integers, not floats, so I will determine if the filesize is odd,
 		//	if it is, i will subtract one from filesize so I can divide evenly, then 
@@ -623,14 +666,14 @@ char findActualFilename(char filename, int fnameLen)
 	Uses the name of the file to search through fdName to find
 	the File Descriptor
 	*/
-	char findFileDescriptor(char last)
+	char findFileDescriptor(char last)// Helper for deleteFile
 	{
 		if(fdName.find(last) != fdName.end())
 		{
-			tempFileDesc = fdName[last];
+			fileDesc = fdName[last];
 		}
 		
-		return tempFileDesc;
+		return fileDesc;
 	}
 	
 	/*
@@ -640,7 +683,7 @@ char findActualFilename(char filename, int fnameLen)
 
 	Update basically the fdMode, and nameType Maps
 	*/
-	int updateCharCharMaps(map<char, char> map, char findWith)
+	int updateCharCharMaps(map<char, char> map, char findWith)// Helper for deleteFile
 	{ 
 		if(map.find(findWith) != map.end())
 		{
@@ -658,45 +701,175 @@ char findActualFilename(char filename, int fnameLen)
 	
 	}
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+	
+	
 /*
 DeleteDirectory 
 
 deletes the directory whose name is pointed to by dirname
 
 Note: only empty directories can be deleted
+		used findDirectoryAddress to look through all possible extensions
+		of the block the previous dInode points to
 
 Returns: 0 if successfully, -1 if doesnt exist, 
 		-2 if not empty, -3 cannot be deleted or other
+		
 */
 int FileSystem::deleteDirectory(char *dirname, int dnameLen)
 {
+	//_Variables_//
+	int dblockNum;// Address (Block number) to the beginning of the dInode 
+	int blockNum;// Address (Block number) to the beginning of the dInode's block 
+	char last;// Variable used to store the actual filename
+	char prevDirName; // Variable used to store the name of the previous directory name 
+	char clearBuffer[64];//Buffer used to 'delete' (replace with 'c's) blocks of 64 bytes
+	char clearDInodeBuffer[6];//Buffer used to 'delete' (replace with 'c's) blocks of 6 bytes (file dInode)
+	
+	
+	//Dummy Variables for the getInode function //
+	//	(doesnt matter what they are set as) These variables will be dereferenced, so after the call to getInode, their values will be correct
+	int filedInodeIndex = 77; //The index at which the file dInode (Im looking for specifically) sits within the directory block
+	char type = 'dont care'; //The type of the dInode, 'f/d' (file or directory)
+	
+	
+	//_Setup Variable_//
+	
+	//Fill both char buffers with 'c's
+	fillClearBuffers(clearBuffer, clearDInodeBuffer);
+	
+	//Find the actual name of the file, and put it in 'last'
+	last = findActualFilename(filename, fnameLen);
+	
+	//Find the actual name of the previous directory, and put it in 'prevDirName'
+	prevDirName = findActualDirectoryFilename(filename, fnameLen);
+	
+	//Find the block address for the block dInode sits in 
+	//Param: (char *filename, int filenamelenght, char file(*last), int &rememberBlock(file dInode), int block(), char type(d/f))
+	dblockNum = getInode(filename, fnameLen, prevDirName, fileDInodeIndex, block, type);
 
+	
+	//_Precondition Check for Errors_//
+	
+	//Check if file exists
+	blockNum = getInode(filename, fnameLen, last, fileDInodeIndex, block, type);
+	if(blockNum == -1)
+	{
+		return -1;
+	}
+	
+	//Check if empty
+	char dInodeBlockBuffer[64];// buffer used to store the dInode's Block 
+	myPM -> readDiskBlock(blocknum, dInodeBlockBuffer);//copy the file Indoe block into the buffer
+	
+	for(int i = 0; i < 64; i++)// Check if buffer is full of 'c's
+	{
+		if(buffer[i] != 'c')
+		{
+			return -2;
+		}
+	}
+	
+
+	//_Copy previous dInode's Block in a Copy Buffer_//	
+	
+	char prev_dInodeBlockBuffer[64];// buffer used to store the Block that dInode sits in
+	myPM -> readDiskBlock(dblocknum, prev_dInodeBlockBuffer);//copy the previous dInode's block into the buffer
+
+	
+	//_Find dInode address in Block_//
+	
+	int actualBlock = dblocknum;//Current block Im searching through, it only changes if 64 bytes is too small for the amount of dInodes stored 
+	int dInodeIndex = findDirectoryAddress(dblocknum, actualBlock, last);//Find the address of the dInode
+	
+	
+	//_Dealocate dInode's Block_//
+	
+	dInodeBlockIndex = dInodeIndex + 1;	// find address dInode points to 
+	myPM -> writeDiskBlock(dInodeBlockIndex, clearBuffer);//write over the dInode's Block with a clearBuffer full of 'c'
+	myPM -> returnDiskBlock(dInodeBlockIndex);//deallocate the block that dInode points to from bitVector
+	
+	
+	//_'Delete' the dInode_//
+	
+	/* (I dont think I need this)
+	//Copy dInode into a buffer
+	char dInodeBuffer[6];// buffer used to store the whole block pointed to by the last directory
+	myPM -> readDiskBlock(dInodeIndex, dInodeBuffer);//copy the file dInode into the buffer
+	*/
+	
+	myPM -> writeDiskBlock(dInodeIndex, clearDInodeBuffer);//write over the current direct block with a clearBuffer full of 'c'
+	
+	return 0;//deleted successfully
 }
+
+	/*
+	FindActualDirectoryFilename
+
+	Param: filename array, length of the filename
+
+	Loops through the filename array to the end and returns the 
+	actual filename for the directory (not /a/b/c/d, but instead returns c)
+	*/
+	char findActualDirectoryFilename(char filename, int fnameLen)// Helper for deleteDirectory
+	{
+		//Find the actual directory filename
+		for(int i = 0; i < (fnameLen - 2) ; i+=2)
+		{
+			char slash = filename[i];
+			char name = filename[i+1];
+			if(slash != '/')
+				return -2;
+			if(!isalpha(name))
+				return -2;
+			prevDirName = name;
+		}
+		return prevDirName;
+	}
+
+	/*
+	FindDirectoryAddress
+	
+	Param: directory block you want to look through, 
+			actual block it will be written to (because the block 
+			might 'extend' past 64 bytes)
+	
+	Returns: Returns the beginning address of the dInode passed in
+	*/
+	inf FileSystem::findDirectoryAddress(int dInodeBlk, int &actualBlk, char last)// Helper for deleteDirectory
+	{
+		char buffer[64];
+		myPM -> readDiskBlock(dInodeBlk, buffer);
+		for(int i = 0; i < 60; i+=6)
+		{
+			if(buffer[i] == last)
+			{
+				return i; //return position in the block the dInode starts
+			}
+		}
+		if(buffer[60] != last) //if the end of the block points somewhere...
+		{
+			//update actualBlk...
+			actualBlk = (int) buffer[60];
+			//return the same function, just different block
+			return findSpot(actualBlk, actualBlk);
+		}
+		else
+		{
+			//get another disk block for addressing
+			actualBlk = myPM -> getFreeDiskBlock();
+			//tell the full block to go to the new one at the end
+			buffer[60] = (char) actualBlk;
+			myPM -> writeDiskBlock(dInodeBlk, buffer);
+			//then return 0, because we can write at the beginning of the new block.
+			return 0;
+			/*REMEMBER TO USE ACTUALBLK VARIABLE PASSED IN, NOT 
+			THE BLOCKNUM PASSED IN!!! They might be the same, but actualblk
+			is what you definitely want to use. */
+		}
+	}
+
+
 
 /*
 OpenFile
@@ -816,7 +989,6 @@ int FileSystem::readFile(int fileDesc, char *data, int len)
 	char mode;// read or write
 	int sizeOfFile;//size of file I found in inode
 	int numTilEOF;//counter to keep from reading off the end of the file
-	//Array<char> readBuffer;
 	char readBuffer[64];//buffer to copy the file into for reading
 	
 	//If operation is not permitted: 
@@ -894,6 +1066,19 @@ int FileSystem::readFile(int fileDesc, char *data, int len)
   return numOfBytesRead;
 }
 
+
+
+
+
+
+
+
+
+
+
+
+
+
 /*
 WriteFile
 
@@ -912,15 +1097,248 @@ Return: -1 if invalid, -2 negative length, -3 operation not permitted,
 */
 int FileSystem::writeFile(int fileDesc, char *data, int len)
 {
-	if(len < 0)
-		return -2;
-	if(fdTable.find(fileDesc) == fdTable.end())
+	//_Variables_//
+	int numOfBytesWritten = 0;// Keeps track the number of successful bytes written
+	int blockNum;// Address (Block number) to the beginning of the file inode 	
+	char fname;// Variable used to store the filename
+	char fullfname; //Store the name and directories to file (exp. /a/b/c/d)
+	char fullfnameLength; //Length of the full name of the file (exp. /a/b/c/d, length is 8)
+	
+	//_Dummy Variables for the getInode function_//
+	//	(doesnt matter what they are set as) These variables will be dereferenced, so after the call to getInode, their values will be correct
+	int filedInodeIndex = 77; //The index at which the file dInode (Im looking for specifically) sits within the directory block
+	char type = 'dont care'; //The type of the dInode, 'f/d' (file or directory)
+	
+	
+	//_Setup Variable_//
+	
+	//Find the name of the file 
+	fname = findFileNameUsingDesc(fileDesc);
+	
+	//Find the full filename (so I can find the file Inode)
+	fullfname = findFullFileNameUsingDesc(fileDesc);
+
+	//Find the length of the full filename
+	fullfnameLength = findFullFilenameLength(fullfname);
+	
+	//Find the block address for the file Inode
+	blockNum = getInode(fullfname, fullfnameLength, fname, fileDInodeIndex, block, type);
+
+
+	//_Precondition Check for Errors_//
+	
+	//Check if invalid: File DNE (Does not exist)
+	if(fname == '1')// check if name DNE
+	{
 		return -1;
-	char *name = fdName[fileDesc];
-	if(nameLock.find(*name) != nameLock.end()) //any other reasons it wouldn't be permitted?
+	}
+	
+	if(fullfname == '1')//Check if full filename DNE
+	{
+		return -1;
+	}
+	
+	if(fullfnameLength == 9000)//Check if full name is valid 
+	{
+		return -1;
+	}
+	
+	//Check if invalid: file is not open
+	if(fdMode.find(fileDesc) == fdMode.end())
+	{
+		return -1;
+	}
+	else
+	{
+		mode = fdMode[fileDesc];
+	}
+	
+	//Check if len is negative 
+	if(len < 0)
+	{
+		return -2;
+	}
+	
+	//Check if operation is not permitted: Check the mode
+	if(mode != 'w' || mode != 'm')
+	{
 		return -3;
+	}
+	
+	//_Find File Inode_//
+	
+	
+	
+	
+	
+	
+	
+	/*
+
+	//_find the file_//
+	//use fileDesc to locate the file name in maps
+	//find where the inode sits by using name as a param to findInode()
+	//copy the inode to a buffer
+	//loop through the buffer to find the adress of where the file sits
+	//now I should be at the beginning of the file
+	
+	//use the inode buffer to find the filesize and save it
+	
+	//_find rw pointer_//
+	//find rw pointer by using fileDesc in maps
+	
+	//_Calculate if file expansion is necessary_//
+	//using the value of the rw pointer, calculate if the file needs to be extended
+	//	if rw pointer + length > filesize
+	
+	//_Extend a file (only if necessary)_//
+	//to extend the file: (means it needs to be bigger than the first direct address block can hold)
+	
+	if second and third direct adress blocks are 0
+	//move to second/third direct address block:
+	need to find the first free disk block, 
+	grab the address to the free block and put it into the second/third direct address slot
+	
+	//if directs are taken, now indirect
+	
+	//copy indirect's block of addresses into a buffer
+	//look through until you find a 0, this means free
+	//then rember that index
+	//find the next free disk block and 
+	// copy that adress into the index of the indirect's adress block
+	
+	
+	//_Write to file_//
+	use rw pointer to write len amount of data (data written should be in *data)
+	//now I have extended the file as needed but I havent written 
+		anything or moved the rw pointer, so now i need to write
+	
+	//If i extended the file, i need to calculate how much i should write 
+		before i need to jump to the next block
+	//create x amount of new buffers of what to write (one for the current block 
+		and the others for the new blcoks)
+	//write the first buffer to the file, update the pointer, and move to the
+		next block to write to
+	//then write the second buffer to the second block and so on until everything has been written
+	// keep updateing the rw pointer
+	// commit the changes to the disk?
+
+	
+	
+	*/
+	
+	
+
   return 0;
 }
+
+/*
+	FindFileNameUsingDesc
+	
+	Param: file descriptor
+	
+	Uses the name of the file to search through fdName to find
+	the File Descriptor
+	*/
+	char findFileNameUsingDesc(int fileDesc)// Helper for writeFile
+	{
+		if(fdName.find(fileDesc) == fdName.end())
+		{
+			tempFilename = '1';
+			return tempFilename;
+		}
+		else
+		{
+			tempFilename = fdName[fileDesc];
+		}
+		
+		return tempFilename;
+	}
+	
+	/*
+	FindFullFileNameUsingDesc
+	
+	Param: file descriptor
+	
+	Uses the name of the file to search through fdFullName to find
+	the files full name (exp. /a/b/c/d/e)
+	*/
+	char findFullFileNameUsingDesc(int fileDesc)// Helper for writeFile
+	{
+		if(fdFullName.find(fileDesc) == fdFullName.end())
+		{
+			tempFullFilename = '1';
+			return tempFullFilename;
+		}
+		else
+		{
+			tempFullFilename = fdFullName[fileDesc];
+		}
+		
+		return tempFullFilename;
+	}
+
+/*
+FindFullFilenameLength
+
+Param: filename array
+
+Loops through the filename array to the end and returns the 
+length of the full filename (/a/b/c/d is length 8)
+*/
+int findFullFilenameLength(char fullfname)// Helper for writeFile
+{
+	//Find the length of the full filename
+	int i = 0;// Loop variable
+	bool done = false; // Loop exit condition
+	char name, slash; // Used to check if full name is valid
+	char next slash; // Used to prevent falling off the name
+	int length = 0; //lenght of the full filename 
+	
+	while(!done)
+	{
+		slash = fullfname[i];
+		name = fullfname[i+1];
+		
+		if(slash != '/' || !isalpha(name))//Check if the name is valid
+		{
+			length = 9000;//error
+		}
+		
+		nextSlash = fullfname[i+2];// Look ahead to next slash
+		if(nextSlash != '/')// Is there a next slash?
+		{
+			done = true;
+		}
+		else
+		{
+			length += 2;
+			i += 2;
+		}
+	}
+	
+	return length;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 /*
 AppendFile
