@@ -10,7 +10,7 @@ class FileSystem {
   std::map<char, char> nameType; //*
   std::map<char, int> nameLock; 
   int lockID;
-  std::map<char, char> openFileTable; //first char is name, second is mode
+  std::map<int, char> fdFullname; //file descriptor to full name 
   std::map<char, char> fdToMode; //* file descriptor to mode (read/write)
   int fileDescriptor;
   std::map<int, int*> fdTable;//* file descriptor to rw pointer

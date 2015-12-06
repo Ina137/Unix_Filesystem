@@ -1103,6 +1103,7 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	char fname;// Variable used to store the filename
 	char fullfname; //Store the name and directories to file (exp. /a/b/c/d)
 	char fullfnameLength; //Length of the full name of the file (exp. /a/b/c/d, length is 8)
+	char fileAddress; // Address to the file from the inode
 	
 	//_Dummy Variables for the getInode function_//
 	//	(doesnt matter what they are set as) These variables will be dereferenced, so after the call to getInode, their values will be correct
@@ -1111,6 +1112,9 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	
 	
 	//_Setup Variable_//
+	
+	//Fill both char buffers with 'c's
+	fillClearBuffers(clearBuffer, clearDInodeBuffer);
 	
 	//Find the name of the file 
 	fname = findFileNameUsingDesc(fileDesc);
@@ -1123,6 +1127,28 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	
 	//Find the block address for the file Inode
 	blockNum = getInode(fullfname, fullfnameLength, fname, fileDInodeIndex, block, type);
+	//Check if file exists
+	if(blockNum == -1)
+	{
+		return -1;
+	}
+	
+	//Find the four direct/indirect addresses
+	int direct1 = blockNum + 5;//1 + 1 + 4 -1;
+	int direct2 = blockNum + 9; //1 + 1 + 4 + 4 -1;
+	int direct3 = blockNum + 13; //1 + 1 + 4 + 4 + 4 -1;
+	int indirect = blockNum + 17; //1 + 1 + 4 + 4 + 4 + 4 -1;
+	
+	
+	//_Setup Copy Buffers_//
+	
+	//Copy File Inode into a buffer
+	char fInodeBuffer[64];// buffer used to store the file Inode
+	myPM -> readDiskBlock(blocknum, fInodeBuffer);//copy the file Inode block into the buffer
+
+	//Copy File Inode into a buffer
+	char indirectAddrBuffer[64];// buffer used to store the file Inode
+	myPM -> readDiskBlock(indirect, indirectAddrBuffer);//copy the file Inode block into the buffer
 
 
 	//_Precondition Check for Errors_//
@@ -1165,15 +1191,84 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 		return -3;
 	}
 	
-	//_Find File Inode_//
-	
-	
-	
-	
-	
-	
+	//_Find RW Pointer_//
+	if(fdTable.find(fileDesc) == fdTable.end())//Check to see if it exists
+	{
+		return -1;
+	}
+	else
+	{
+		int rw = fdTable[fileDesc];
+	}
 	
 	/*
+	RW pointer table
+	direct1 : 0-63
+	direct2 : 64-127
+	direct3 : 128-191
+	indirect : xxx
+	*/
+	char writingBlk;
+	int rwMod = (rw + 1) / 64; //So I can determine which file block the rw pointer is pointing
+	int rwToFileIndex; // What index to point at in a file block
+	int fileAddress;// address in which the section of the file the rw points to
+	
+	
+	
+	switch(rwMod)
+	{
+		case 1: //get direct1 block address
+			rwToFileIndex = rw;//File index the rw points to
+			fileAddress = fInodeBuffer[direct1];//get the address to the file
+			break;
+		case 2://get direct2 block address
+			rwToFileIndex = rw - 64;// File index the rw points to
+			fileAddress = fInodeBuffer[direct2];//get the address to the file
+			break;
+		case 3://get direct3 block address
+			rwToFileIndex = rw - (64 * 2);//File index the rw points to
+			fileAddress = fInodeBuffer[direct3];//get the address to the file
+			break;
+		default: //case rwMod > 3
+			rwToFileIndex = rw - (64 * (rwMod -1));//File index the rw points to
+			rwMod -= 3;//Subtract 3 to get the correct index for the indirect address block
+			fileAddress = indirectAddrBuffer[rwMod];//get the address to the file
+			break;
+	}
+	
+	//_Calculate if the File needs to Expand_//
+	
+	//Create a char buffer of *data
+	
+	
+	if( rwToFileIndex + len >= 64)//Check if the file needs to expand
+	{
+		//Calculate how much space is left in the block
+		//Create a temp buffer of that size and copy data into it
+		//Update the data buffer so it only has the rest of the data
+		//Write the temp buffer to the disk 
+		//Add len to the rw pointer and store it back into the map for persistance
+		
+		//_Check to see if the next block is allocated for writing_//
+		//		if there is another block alocated, then proceed as normal
+		
+		//		if there isnt another alocated block, I need to alocate one 
+		
+		
+		//then recursivly call this function with the updated data string
+	}
+	else//Wright data to file
+	{
+		//Put the data into a char buffer of lenght len
+		//Write this buffer to the disk from where rwToFileIndex is pointing 
+		//Update the rw pointer by adding len to it
+	}
+	
+
+	
+	
+	
+	/* This big chunk of comments are my initial thoughts on what writeFile should do
 
 	//_find the file_//
 	//use fileDesc to locate the file name in maps
@@ -1222,13 +1317,8 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	//then write the second buffer to the second block and so on until everything has been written
 	// keep updateing the rw pointer
 	// commit the changes to the disk?
-
-	
-	
 	*/
 	
-	
-
   return 0;
 }
 
