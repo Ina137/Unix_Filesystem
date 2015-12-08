@@ -19,8 +19,16 @@ FileSystem::FileSystem(DiskManager *dm, char fileSystemName)
 	myfileSystemSize = psize;
 	lockID = 0;
 	fileDescriptor = 0;
-	// char dirInode[64];
-	// dirInode[0];
+	int rootBlock = 1;
+	char root[64];
+	myPM -> readDiskBlock(rootBlock, root);
+	root[0] = '/';
+	root[1] = (char) rootBlock;
+	root[2] = 'd';
+	root[3] = '0';
+	root[4] = '0';
+	root[5] = '0';
+	myPM -> writeDiskBlock(rootBlock, root);
 }
 
 
@@ -1105,13 +1113,10 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	char fullfnameLength; //Length of the full name of the file (exp. /a/b/c/d, length is 8)
 	char fileAddress; // Address to the file from the inode
 	
-	//_Dummy Variables for the getInode function_//
-	//	(doesnt matter what they are set as) These variables will be dereferenced, so after the call to getInode, their values will be correct
-	int filedInodeIndex = 77; //The index at which the file dInode (Im looking for specifically) sits within the directory block
-	char type = 'dont care'; //The type of the dInode, 'f/d' (file or directory)
+
 	
 	
-	//_Setup Variable_//
+	//_Setup Variables_//
 	
 	//Fill both char buffers with 'c's
 	fillClearBuffers(clearBuffer, clearDInodeBuffer);
@@ -1125,19 +1130,50 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	//Find the length of the full filename
 	fullfnameLength = findFullFilenameLength(fullfname);
 	
-	//Find the block address for the file Inode
+	//_Dummy Variables for the getInode function_//
+	//	(doesnt matter what they are set as) These variables will be dereferenced, so after the call to getInode, their values will be correct
+	int l = -999;//The index at which the file dInode (Im looking for specifically) sits within the directory block
+	char type = ' ';//The type of the dInode, 'f/d' (file or directory)
+	char last = findActualFilename(fullfname, fullfnameLength);
+	bool exists = false;
+	
+	int blockNum = getInode(fullfname, fullfnameLength, fname, l, block, type, exists);
+	if(blockNum == -1 || type == 'd')
+		return -1;
+	
+	char inode[64];
+	int r = myPM -> readDiskBlock(blockNum, inode);
+	if(r != 0)
+		return -3;
+	
+	int direct1 = (int) inode[6];
+	int direct2 = (int) inode[10];
+	int direct3 = (int) inode[14];
+	int indirect[16];
+	
+	char indirectBlock[64];
+	r = myPM -> readDiskBlock((int) inode[18], indirectBlock);
+	for(int i = 0; i < 16; i+=4)
+	{
+		indirect[i] = (int) indirectBlock[i*4];
+	}
+	
+	/*//Find the block address for the file Inode
 	blockNum = getInode(fullfname, fullfnameLength, fname, fileDInodeIndex, block, type);
 	//Check if file exists
 	if(blockNum == -1)
 	{
 		return -1;
-	}
+	}*/
 	
+	/*
 	//Find the four direct/indirect addresses
 	int direct1 = blockNum + 5;//1 + 1 + 4 -1;
 	int direct2 = blockNum + 9; //1 + 1 + 4 + 4 -1;
 	int direct3 = blockNum + 13; //1 + 1 + 4 + 4 + 4 -1;
-	int indirect = blockNum + 17; //1 + 1 + 4 + 4 + 4 + 4 -1;
+	int indirect = blockNum + 17; //1 + 1 + 4 + 4 + 4 + 4 -1;*/
+	
+	
 	
 	
 	//_Setup Copy Buffers_//
@@ -1208,42 +1244,109 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	direct3 : 128-191
 	indirect : xxx
 	*/
-	char writingBlk;
 	int rwMod = (rw + 1) / 64; //So I can determine which file block the rw pointer is pointing
 	int rwToFileIndex; // What index to point at in a file block
 	int fileAddress;// address in which the section of the file the rw points to
 	
+	char fileBuffer[64];// a buffer used to store data to be written to the file block
 	
-	
+	//Which of the direct/indirect blocks is the rw pointing in
 	switch(rwMod)
 	{
 		case 1: //get direct1 block address
 			rwToFileIndex = rw;//File index the rw points to
 			fileAddress = fInodeBuffer[direct1];//get the address to the file
+			myPM -> readDiskBlock(fileAddress, fileBuffer);//copy the file block located at fileAddress
 			break;
 		case 2://get direct2 block address
 			rwToFileIndex = rw - 64;// File index the rw points to
 			fileAddress = fInodeBuffer[direct2];//get the address to the file
-			break;
+			myPM -> readDiskBlock(fileAddress, fileBuffer);//copy the file block located at fileAddress			break;
 		case 3://get direct3 block address
 			rwToFileIndex = rw - (64 * 2);//File index the rw points to
 			fileAddress = fInodeBuffer[direct3];//get the address to the file
+			myPM -> readDiskBlock(fileAddress, fileBuffer);//copy the file block located at fileAddress
 			break;
 		default: //case rwMod > 3
 			rwToFileIndex = rw - (64 * (rwMod -1));//File index the rw points to
 			rwMod -= 3;//Subtract 3 to get the correct index for the indirect address block
 			fileAddress = indirectAddrBuffer[rwMod];//get the address to the file
+			//copy the block at that address into a buffer
+			myPM -> readDiskBlock(fileAddress, fileBuffer);//copy the file block located at fileAddress
 			break;
 	}
 	
 	//_Calculate if the File needs to Expand_//
 	
-	//Create a char buffer of *data
-	
+	//Copy *data into a buffer
+	char dataBuffer[len];//buffer to store data in case I need to write to multiple blocks	
+	for(int i = 0; i < len; i++)//copy data into a buffer
+	{
+		dataBuffer[i] = data[i];
+	}
 	
 	if( rwToFileIndex + len >= 64)//Check if the file needs to expand
 	{
 		//Calculate how much space is left in the block
+		int spaceLeft = 64 - rwToFileIndex;
+		int newlenght = len - spaceLeft;//where to cut *data
+		
+		char firstHalfData[spaceleft];
+		char secondHalfdata[newlength];
+		
+		for(int i = 0; i < spaceleft; i++)//copy data into a buffer
+		{
+			firstHalfData[i] = data[i];
+		}
+		
+		for(int i = 0; i < newlength; i++)//copy data into a buffer
+		{
+			secondHalfData[i] = data[i];
+		}
+		
+		//Write this buffer to the disk from where rwToFileIndex is pointing 
+		myPM -> writeDiskBlock(rwToFileIndex, firstHalfData);
+		//update rw pointer
+		rw += rwToFileIndex;
+		fdTable[fileDesc] = rw;//write rw to disk for persistance
+		len -= spaceleft;
+		
+		//_Check to see if the next block is allocated_//
+		//check the inode
+		if(direct2 == 0)
+		{
+			inode[10] = myPM -> getFreeDiskBlock();
+		}
+		else if(direct3 == 0)
+		{
+			inode[14] = myPM -> getFreeDiskBlock();
+		}
+		else//check indirect block
+		{
+			int index = 0;
+			bool done = false;
+			
+			while(!done)
+			{
+				if(indiex >= 64)
+				{
+					//there is no more space to allocate
+					return -3;//not permitted
+				}
+				if(indirect[index] == 0)//is this block unallocated?
+				{
+					indirect[index] = myPM -> getFreeDiskBlock();//allocate a block of memory and assign the address to the inode
+					done = true;
+				}
+			}
+		
+		}
+		
+		
+		
+		
+		
+		
 		//Create a temp buffer of that size and copy data into it
 		//Update the data buffer so it only has the rest of the data
 		//Write the temp buffer to the disk 
@@ -1259,9 +1362,10 @@ int FileSystem::writeFile(int fileDesc, char *data, int len)
 	}
 	else//Wright data to file
 	{
-		//Put the data into a char buffer of lenght len
 		//Write this buffer to the disk from where rwToFileIndex is pointing 
+		myPM -> writeDiskBlock(rwToFileIndex, fileBuffer);
 		//Update the rw pointer by adding len to it
+		rw += len;
 	}
 	
 
@@ -1441,19 +1545,205 @@ appends the data at the end of the file
 Return: -1 if invalid, -2 negative length, -3 operation not permitted,
 		or number of bytes appended if successful+
 		
-		rw is updated to point to the byte follwoing the last byte appended
+		rw is updated to point to the byte following the last byte appended
 		
 */
 int FileSystem::appendFile(int fileDesc, char *data, int len)
 {
-	if(len < 0)
-		return -2;
-	if(fdTable.find(fileDesc) == fdTable.end())
+	//_make sure file exists by finding it's inode_//
+	//find name using fileDescriptor
+	if(fdName.find(fileDesc) == fdName.end())
+	{
 		return -1;
-	char *name = fdName[fileDesc];
-	if(nameLock.find(*name) != nameLock.end()) //any other reasons it wouldn't be permitted?
+	}
+	else
+	{
+		char filename = fdName[fileDesc];
+	}
+	
+	//Find the full filename (so i can find the inode)
+	if(fdFullName.find(fileDesc) == fdFullName.end())
+	{
+		return -1;
+	}
+	else
+	{
+		char* fullFilname = fdFullName[fileDesc];
+	}
+	
+	int fullLength = filenameLength(fullFilename);
+	
+	int l = -999;//The index at which the file dInode (Im looking for specifically) sits within the directory block
+	char type = ' ';//The type of the dInode, 'f/d' (file or directory)
+	bool exists = false;// does the file exist
+	int blockNum = getInode(fullFilename, fullLength, filename, l, block, type, exists);
+	if(blockNum == -1 || type == 'd')
+		return -1;
+	
+	//get inode into a buffer
+	char inode[64];
+	int r = myPM -> readDiskBlock(blockNum, inode);
+	if(r != 0)
 		return -3;
-	return 0;
+	
+	//addresses for each block 
+	int direct1 = (int) inode[6];
+	int direct2 = (int) inode[10];
+	int direct3 = (int) inode[14];
+	int indirect[16];
+	
+	//get indirect address block
+	char indirectBlock[64];
+	r = myPM -> readDiskBlock((int) inode[18], indirectBlock);
+	for(int i = 0; i < 16; i+=4)
+	{
+		indirect[i] = (int) indirectBlock[i*4];
+	}
+	
+	//Check if length is negative
+	if(len < 0)
+	{
+		return -2;
+	}
+	
+	//Check if file is locked against writing
+	if(fdMode.find(fileDesc) == fdMode.end())
+	{
+		return -1;
+	}
+	else
+	{
+		mode = fdMode[fileDesc];
+	}
+	if(mode != 'w' || mode != 'm')
+	{
+		return -3;
+	}
+	
+	//Get rw pointer
+	if(fdTable.find(fileDesc) == fdTable.end())//Check to see if it exists
+	{
+		return -1;
+	}
+	else
+	{
+		int rw = fdTable[fileDesc];
+	}
+	
+	//_Calculate what block it is pointing at_//
+	/*
+	RW pointer table
+	direct1 : 0-63
+	direct2 : 64-127
+	direct3 : 128-191
+	indirect : xxx
+	*/
+	int rwMod = (rw + 1) / 64; //So I can determine which file block the rw pointer is pointing
+	int rwinodeIndex; // What index to point at in a file block
+	char* block;
+	
+	//Which of the direct/indirect blocks is the rw pointing in
+	//and Calculate what index in the block rw is pointing 
+	switch(rwMod)
+	{
+		case 1: //get direct1 block address
+			rwinodeIndex = rw;//File index the rw points to
+			block = myPM -> readDiskBlock[direct1];
+			break;
+		case 2://get direct2 block address
+			rwinodeIndex = rw - 64;// File index the rw points to
+			block = myPM -> readDiskBlock[direct2];
+		case 3://get direct3 block address
+			rwinodeIndex = rw - (64 * 2);//File index the rw points to
+			block = myPM -> readDiskBlock[direct3];
+			break;
+		default: //case rwMod > 3
+			rwinodeIndex = rw - (64 * (rwMod -1));//File index the rw points to
+			rwMod -= 3;//Subtract 3 to get the correct index for the indirect address block
+			block = myPM -> readDiskBlock[indirect[rwMod]];
+			break;
+	}
+	
+	//Check if there is enough block space to write to file
+	if(rwinodeIndex + len > 63)
+	{
+		int spaceleft = 63 - rwinodeIndex;
+		//  If file needs to expand,
+		//  Loop through the inode and find the next address block that is unallocated
+		int i = 0;// Loop variable
+		bool done = false; // Loop exit condition
+		int index;//first index of the inode that is empty
+		while(!done)
+		{
+			if(inode[i] == ' ';)
+			{
+				index = i;
+				done = true;
+			}
+		}
+		
+		//  Call get getDiskBlock and put the address in the inode
+		int freeAddress = myPM -> getFreeDiskBlock();//get next free block, return address
+		inode[index] = freeAddress;//put address in inode
+
+		//	Split the data into two buffers
+		int spaceleft = 63 - rwinodeIndex;
+		char firstBuffer[spaceleft];
+		int chaffData = len - spaceleft; 
+		char secondBuffer[chaffData];
+		
+		//	write the first part of data to the first block
+		myPM -> writeDiskBlock(rwinodeIndex, firstBuffer);
+
+		// 	Update rw pointer +1 
+		fdTable[fileDesc] = rw + spaceleft + 1;
+		
+		// pass second data buffer and length of that buffer into a recursive call to this function
+		appendFile(fileDesc, secondBuffer, chaffData);
+	}
+	else
+	{
+		//	If there is, write len amount of data to the disk
+		myPM -> writeDiskBlock(rwinodeIndex, data);
+		//  Update rw pointer 
+		fdTable[fileDesc] = rw + len + 1;
+	}
+	
+	/*
+    if(fdTable.find(fileDesc) == fdTable.end())
+		return -1;
+	char name = fdName[fileDesc];
+	if(nameLock.find(name) != nameLock.end()) 
+		return -3;
+    // check if file is open
+    if(fdMode.find(fileDesc) == fdMode.end())
+        return -3;
+    // check if file was opened for writing
+    if(fdMode[fileDesc] == 'r')
+        return -3;
+
+    char* fullName = fdFullName[fileDesc];
+    int rw = fdTable[fileDesc];
+    char buffer[64];
+    int l = -999; // fileDInodeIndex
+    char type = ' ';
+    bool exists = true;
+    int inodeBlock = getInode(fullName, filenameLength(fullName), name, l, 1, type, exists);
+    myPM -> readDiskBlock(inodeBlock, buffer);
+
+    char tempSize[5];
+    for(int i = 2; i < 6; i++)
+    {
+        tempSize[i-2] = buffer[i];
+    }
+    tempSize[4] = '\0';
+    int size = atoi(tempSize);
+
+    fdTable[fileDesc] = size; // update rw pointer to point to the end of the file
+
+    return writeFile(fileDesc, data, len); // will return number of bytes written or any errors
+	*/
+}
 }
 
 /*
